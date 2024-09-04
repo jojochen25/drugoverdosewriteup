@@ -1,0 +1,459 @@
+---
+title: "Mixed Effects Regression Analysis on Drug Overdose Rates"
+author: 
+- Jodie Chen
+date: "July 26, 2024"
+toc: true
+format:
+  html:
+    theme: cosmo
+    html-math-method: katex
+    self-contained: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Drug overdoses have emerged as a critical public health issue, with widespread consequences for communities worldwide. To address this growing concern, it is crucial to understand the underlying factors that contribute to overdose rates. This study examines whether demographic and social variables—such as age, income, education, and geographic location—can serve as predictors of drug overdose incidents. By analyzing these variables, we aim to identify significant risk factors and offer insights that can inform targeted prevention strategies and policy decisions.
+
+# Background
+
+The County Health Rankings and Roadmaps dataset contains county-level data on social and demographic variables. It is possible that counties within the same region (e.g. state) are correlated–overdose death rates could vary by state due to differences in locally-regulated healthcare systems, law enforcement involving drugs, drug accessibility (variables not examined in the analysis). For example, West Virginia has by far the highest drug overdose deaths with opioid accounting for 83% of all drug overdose deaths in 2021. This is higher than the state average opioid overdose deaths accounting for 75% of drug overdose deaths. Uncoincidentally, this is attributed to West Virginia having the highest opioid prescription rate. This baseline variability could also be attributed to regional differences (across the US and within state) in specific drug availability and use.
+
+# Methods
+
+Since counties could be correlated within different geographic region levels, I decided to test various mixed effects models with a random intercept term for: 
+
+**1. Urbanization level (three levels)**-- CDC found that urban counties generally had higher drug overdoses due to higher population density and easier access to drugs from the greater number of distributors and markets in the cities. 
+
+**2. Public Health regions as defined by the U.S. Department of Health and Human Services**-- Counties in these regions may vary in drug overdoses as different public health initiatives are implemented based on the specific needs of the territories/states within each region. 
+
+**3. The 50 states**–-for reasons mentioned in Background. 
+
+I assumed that the effect of social and demographic predictors on drug overdose is constant, making the predictors fixed effects.
+
+To determine if random intercepts are even necessary, I included models with only fixed effects. I used AIC–an approximation of leave-one-out cross validation–for model selection. The model is fit to n-1 observations to predict the response of one observation. This is done n times in which a different observation is left out from the training set each time. 
+
+
+```{r cars, include=FALSE}
+library(readr)
+library(pdp)
+library(vip)
+library(rpart.plot)
+library(rpart)
+library(caret)
+library(tidyverse)
+library(janitor)
+
+# if there is an error, load data_org into your workspace by clicking on data_org copy.RData
+load("~/Downloads/CMU program/Modeling Drug Overdose/data_org copy.RData")
+
+sel_data<-health_data |>
+  slice(-1) |>
+  rename(
+    Drug_Overdose_Deaths = drug_overdose_deaths_raw_value,
+    mental_ratio = ratio_of_population_to_mental_health_providers,
+    #uninsured=uninsured_raw_value,
+    suicides = suicides_raw_value,
+    Alcohol_Impaired_Driving_Deaths = alcohol_impaired_driving_deaths_raw_value,
+    Unemployment_Rate = unemployment_raw_value,
+    Income_Inequality = income_inequality_raw_value,
+    College_Comp_Rate = some_college_raw_value,
+    Adult_Smoking_Rate = adult_smoking_raw_value,
+    Excessive_Drinking_Rate = excessive_drinking_raw_value,
+    Median_House_Income = median_household_income_raw_value,
+    Highschool_Comp_Rate = some_college_raw_value,
+    Children_In_Poverty = children_in_poverty_raw_value,
+    Single_Parent_House = children_in_single_parent_households_raw_value,
+    Social_Associations = social_associations_raw_value,
+    Pop_Under_18 = x_below_18_years_of_age_raw_value,
+    Pop_Over_65 = x_65_and_older_raw_value,
+    NH_Black = x_non_hispanic_black_raw_value,
+    American_Or_Alaska_Native = x_american_indian_or_alaska_native_raw_value,
+    Asian_Pop = x_asian_raw_value,
+    Pacific_Islander = x_native_hawaiian_or_other_pacific_islander_raw_value,
+    Hispanic_Pop = x_hispanic_raw_value,
+    NH_White = x_non_hispanic_white_raw_value,
+    English_Profic = x_not_proficient_in_english_raw_value,
+    Female_Pop = x_female_raw_value,
+    Rural_Pop = x_rural_raw_value
+  ) 
+
+selected_data <- sel_data|> # non-scaled
+  select(
+    name, state_abbreviation, x5_digit_fips_code, x5_digit_fips_code, Drug_Overdose_Deaths, Alcohol_Impaired_Driving_Deaths,
+    Unemployment_Rate, Income_Inequality, Highschool_Comp_Rate, 
+    Adult_Smoking_Rate, Excessive_Drinking_Rate, Median_House_Income,
+    Highschool_Comp_Rate, Children_In_Poverty, Single_Parent_House,
+    Social_Associations, Pop_Under_18, 
+    Pop_Over_65, NH_Black, 
+    American_Or_Alaska_Native, Hispanic_Pop, 
+    Female_Pop, Rural_Pop, population_raw_value, mental_ratio, suicides, #uninsured
+  ) |>
+  mutate(x5_digit_fips_code=ifelse(nchar(x5_digit_fips_code) == 4, paste0("0", x5_digit_fips_code), x5_digit_fips_code)) |>
+  mutate(across(c(Drug_Overdose_Deaths, Alcohol_Impaired_Driving_Deaths,
+    Unemployment_Rate, Income_Inequality, Highschool_Comp_Rate, 
+    Adult_Smoking_Rate, Excessive_Drinking_Rate, Median_House_Income,
+    Highschool_Comp_Rate, Children_In_Poverty, Single_Parent_House,
+    Social_Associations, Pop_Under_18, 
+    Pop_Over_65, NH_Black, 
+    American_Or_Alaska_Native, Hispanic_Pop, 
+    Female_Pop, Rural_Pop, population_raw_value, mental_ratio, suicides), 
+    as.numeric
+  ))
+
+# create a new variable that categorizes counties by HHS public health region 
+selected_data <-selected_data |>
+  mutate(region=case_when(
+    state_abbreviation %in% c("CT", "ME", "MA", "NH", "RI", "VT") ~ "Region 1",
+    state_abbreviation %in% c("NJ", "NY", "PR", "VI") ~ "Region 2",
+    state_abbreviation %in% c("DE", "DC", "MD", "PA", "VA", "WV") ~ "Region 3",
+    state_abbreviation %in% c("AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN") ~ "Region 4",
+    state_abbreviation %in% c("IL", "IN", "MI", "MN", "OH", "WI") ~ "Region 5",
+    state_abbreviation %in% c("AR", "LA", "NM", "OK", "TX") ~ "Region 6",
+    state_abbreviation %in% c("IA", "KS", "MO", "NE") ~ "Region 7",
+    state_abbreviation %in% c("CO", "MT", "ND", "SD", "UT", "WY") ~ "Region 8",
+    state_abbreviation %in% c("AZ", "CA", "HI", "NV", "AS", "MP", "FM", "GU", "MH", "PW") ~ "Region 9",
+    state_abbreviation %in% c("AK", "ID", "OR", "WA") ~ "Region 10",
+    TRUE ~ "Unknown"
+  ))
+
+
+library(tigris)
+
+new_sel<-selected_data |>
+  mutate(urban_pop=1-Rural_Pop)
+  
+
+quantiles <- quantile(new_sel$urban_pop, probs = c(0, 0.33, 0.66, 1))
+
+# Display the quantiles
+print(quantiles)
+
+# create 2-level variable that represents if county is more rural or urban 
+# create 3-level variable that represents if county is rural, suburban, or rural
+new_df <- new_sel |>
+  mutate(urban_level = ifelse(urban_pop==0, "rural", ifelse(urban_pop<0.52, "suburban", "urban"))) |>
+  mutate(Urban_yes=ifelse(urban_pop>0.33, "urban", "rural")) # urban with just 2 levels
+
+
+library(caret)
+
+new_drugsdf <- new_df |>
+  # mutate(income_ineq_level=ifelse(Income_Inequality<0.123, "low", "high")) |>
+  mutate(urban_num=as.numeric(factor(urban_level, levels = c("rural", "suburban", "urban")))) |> 
+  mutate(urban_num_twolev = as.numeric(factor(Urban_yes, levels = c("urban", "rural")))) |>
+  select(x5_digit_fips_code, name, state_abbreviation, Drug_Overdose_Deaths, Unemployment_Rate, Income_Inequality, suicides, mental_ratio, Adult_Smoking_Rate, Median_House_Income, Highschool_Comp_Rate, Single_Parent_House, Social_Associations,
+         NH_Black, American_Or_Alaska_Native, Hispanic_Pop, Female_Pop, region, urban_pop, urban_level,
+         Urban_yes, urban_num, urban_num_twolev) |> # removed pop_den
+  # select(-Alcohol_Impaired_Driving_Deaths, -Excessive_Drinking_Rate, 
+  #        -geometry, -land_area_km, -population_raw_value, 
+  #        -Rural_Pop, -land_area, -Highschool_Comp_Rate,
+  #        -Pop_Under_18, -Pop_Over_65, -Children_In_Poverty, urban_level, region) |>
+  mutate(across(c(Unemployment_Rate, Income_Inequality, Adult_Smoking_Rate, Median_House_Income, Highschool_Comp_Rate,
+                  Social_Associations, NH_Black, American_Or_Alaska_Native, Hispanic_Pop, Female_Pop, suicides, mental_ratio), scale)) |>
+  drop_na(Drug_Overdose_Deaths) 
+
+new_drugsdf$urban_num_twolev<-as.factor(new_drugsdf$urban_num_twolev)
+new_drugsdf$urban_num<-as.factor(new_drugsdf$urban_num)
+
+
+# don't make this into a binary variable--urban_pop, urban_num, urban_num_twolev,
+# urban_num_twolev--1 is urban, 2 rural
+
+```
+
+# Results
+
+```{r pressure, include=FALSE}
+new_drugsdf <- new_drugsdf |>
+  select(Drug_Overdose_Deaths, Unemployment_Rate, Income_Inequality, Median_House_Income, Adult_Smoking_Rate, Highschool_Comp_Rate, suicides, mental_ratio, Social_Associations, Female_Pop, urban_num_twolev, urban_num, urban_level, region, state_abbreviation) |>
+  drop_na()
+
+library(lme4)
+library(caret)
+fixed_no_urban <-lm(Drug_Overdose_Deaths~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + mental_ratio+ suicides, data=new_drugsdf)
+
+fixed_urban <-lm(Drug_Overdose_Deaths~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + urban_num_twolev+ mental_ratio+ suicides, data=new_drugsdf)
+
+random_urban <-lmer(Drug_Overdose_Deaths~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop +  mental_ratio+ suicides +(1|urban_level), data=new_drugsdf)
+
+random_state <-lmer(Drug_Overdose_Deaths~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + urban_num_twolev + mental_ratio+ suicides+(1|state_abbreviation), data=new_drugsdf)
+
+random_region <- lmer(Drug_Overdose_Deaths~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + urban_num_twolev + mental_ratio+ suicides+ (1|region), data=new_drugsdf)
+```
+
+Ultimately, the model with random intercepts for states has the lowest AIC and therefore the best fit. 
+
+```{r, echo=FALSE}
+AIC(fixed_no_urban, fixed_urban, random_urban, random_region, random_state)
+
+# arm::plot(fitted(random_state), residuals(random_state))
+# 
+# summary(random_state)
+```
+
+However, there is a cone shape pattern which indicates heteroscedastic. To resolve this, I applied a log transformation on Drug Overdose Deaths.
+
+```{r, include=FALSE}
+library(arm)
+library(lme4)  # arm relies on lme4 for fitting mixed models
+library(car)
+```
+
+```{r, echo=FALSE}
+plot(fitted(random_state), residuals(random_state))
+#summary(random_state)
+
+```
+
+
+```{r, echo=FALSE}
+
+log_random_state <-lmer(log(Drug_Overdose_Deaths)~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + urban_num_twolev + mental_ratio+ suicides +(1|state_abbreviation), data=new_drugsdf)
+
+plot(fitted(log_random_state), residuals(log_random_state))
+# AIC(log_fixed_no_urban, log_fixed_urban, log_random_urban, log_random_state)
+
+# log_random_s <-lmer(log(Drug_Overdose_Deaths)~Unemployment_Rate + Income_Inequality + Median_House_Income + Adult_Smoking_Rate + Highschool_Comp_Rate + Social_Associations + Female_Pop + mental_ratio+ suicides +(1|state_abbreviation), data=selected_data)
+
+
+```
+
+## Social and demographic predictors that affect drug overdoses
+
+Looking at the fixed effects plot below, it is evident that high county-level **income inequality ratios** is associated with high drug overdose deaths. Fatal drug overdoses are more common among areas with more economic distress which explains why a greater income inequality ratio is attributed to higher drug overdoses: if the income inequality ratio increases by 1, drug overdoses increase by 1.12 deaths per 100,000 (assuming the average drug overdose is 25 deaths/100,000) which is a 4.5% increase.
+
+**% female**, surprisingly, is also associated with drug overdose. While males historically have had higher rates of drug overdose deaths than females, the model shows since 2019, counties with higher female populations have higher drug overdose rates. If a county’s female population increases by 1%, drug overdoses (per 100,000) is expected to increase by 2.4% or about 1 death /166,000. This jump might be explained by a 3-fold increase in overdose mortality from 2018-2021 for pregnant and postpartum women in 2018-2021. Dr. Nora Volkow, director of the National Institute on Drug Abuse, attributed this to the fact that drug use is even more stigmatized for pregnant women, making them less likely to seek or receive help for dependence on opioids and other drugs. Furthermore, pregnant and postpartum women face punitive policies for drug abuse including loss of custody of their children and incarceration. 60% of drug overdose deaths among pregnant women occurred outside healthcare settings, often in counties with sufficient healthcare resources like emergency and obstetric care, which proves that medical services are present but are not being accessed. Such stigmatization and punitive measures discourage women from seeking help. 
+
+Suicide rate has a weaker association compared to the other two–increasing suicide rate by 1 per 100,000 results in 1.81% increase in drug overdoses or 1 death per 200,000.
+
+
+```{r, include=FALSE}
+summary(log_random_state)
+confint(log_random_state)
+
+library(lmerTest)
+
+model_random_state = summary(log_random_state)
+coefficients <- model_random_state$coefficients[2:11, 1] 
+conf_intervals <- confint(log_random_state, level = 0.95, oldNames=FALSE)
+
+coef_df <- data.frame(
+  Predictor = c('Unemployment Rate', 'Income Inequality',
+                'Median Income', 'Smoking Rate', 'Highschool Comp Rate', 
+                'Social Associations', '% Female', 'Urbanization', 'Mental Health Providers ratio', 'Suicide rate'),
+  Estimate = coefficients,
+  #StdError = coefficients[, "Std. Error"],
+  ConfLow = conf_intervals[4:13, "2.5 %"],
+  ConfHigh = conf_intervals[4:13, "97.5 %"]
+)
+# term = fct_reorder(term, estimate)
+```
+
+```{r, echo=FALSE}
+ggplot(coef_df, aes(x = Estimate, y = reorder(Predictor, Estimate), xmin = ConfLow, xmax = ConfHigh)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_errorbarh(height = 0.2, linewidth = 1.4, color = "red", show.legend = FALSE) +
+  geom_point(size = 1.5, shape = 21, fill = "black", show.legend = FALSE) +
+  labs(title = "Fixed Effects Estimates for Drug Overdose Deaths",
+       x = "Coefficient",
+       y = "Predictors") +
+  labs(y = NULL) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 16),      # Title text size
+    axis.title.x = element_text(size = 14),                   # X-axis title text size
+    axis.title.y = element_text(size = 14),                   # Y-axis title text size
+    axis.text.x = element_text(size = 12),                    # X-axis text size
+    axis.text.y = element_text(size = 12),                    # Y-axis text size
+    legend.text = element_text(size = 12)                      # Legend text size
+  )
+  
+
+#abline(v = 0, col = "black", lwd = 2, lty = 2)
+```
+
+Each $10,000 increase in **median house income** is associated with a drug overdose decrease by 3.045% or decrease in 1 death per 115,000. This is in line with previous studies that found a link between low socioeconomic status and long-term opioid use for management of chronic pain and conversely, people with higher education level and income are more likely to accept costlier, non-pharmacological treatments like physical therapy. This makes sense as low-income communities have higher concentrations of economic stressors like poverty, low educational attainment, and unemployment which could be related to higher drug overdose rates as residents are more likely to misuse drugs to manage stress caused by economic distress. 
+
+Membership organization have less of an effect–increasing membership organizations (i.e. bowling centers, golf clubs, fitness centers, religious organizations) per 100,000 decreases drug overdoses by 1.64% or 1 death per 200,000. Number of membership associations can be a metric for social support networks, indicating that counties with more opportunities for community building could decrease drug overdoses. 
+
+Rural counties have slightly fewer drug overdoses than urban counties with 5.28% fewer drug overdoses or 1.3 fewer drug overdoses per 100,000 (using the mean 25 drug overdose deaths/100,000). 
+
+```{r, include=FALSE}
+new_drugsdf_num <- new_drugsdf |>
+  dplyr::select(!c(urban_num_twolev, region, state_abbreviation, urban_level, urban_num))
+
+corr_mat<-cor(new_drugsdf_num)
+# Plot the heat map
+library(ggcorrplot)
+```
+
+
+```{r, echo=FALSE}
+ggcorrplot(corr_mat, method = "circle", type = "full", 
+           lab = TRUE, lab_size = 3, 
+           title = "Correlation Heat Map", 
+           colors = c("blue", "white", "red"))
+
+# library(ggplot2)
+# ggplot(data=corr_mat, aes())
+
+```
+    
+Percentage of high school completion, adult smoking rate, median house income are highly correlated with each other.
+
+```{r, include=FALSE}
+library(lme4)
+library(broom.mixed)
+example(lmer)
+
+# create get estimates effects of state 
+
+# exclude fixed effects
+# create a plot that visualizes the different intercepts for random state and CI
+
+# conf.low and conf.high gives 95% confidence interval
+tidy_model <- tidy(random_state, effects="ran_vals", conf.int = TRUE)
+
+library(forcats)
+
+# ADD THIS--reordering the levels
+tidy_model$level <- fct_reorder(tidy_model$level, tidy_model$estimate)
+```
+
+## Other factors that affect state-level variability
+
+Ignoring the effect of predictors on drug overdose, we consider the baseline drug overdoses for each state indicated by the random intercepts to see if there are external factors contributing to drug overdose rates. West Virginia has by far the highest drug overdose rate which aligns with the state statistic in having the highest opioid prescription rate in the United States. This is largely attributed to the high number of heavy manual labor professions like mining and timbering which often cause injuries to workers. Delaware’s high drug overdose rate is also primarily related to the opioid crisis and high opioid prescription rate—opioid overdose accounted for 88% of the state’s drug overdose deaths in 2021. In Delaware and its surrounding states, new drugs and combinations are frequently used in conjunction with opioids, making traditional treatment options not as effective. For example, 90% of opioid street samples were found to contain xylazine which does not respond to the opioid overdose reversal drug naloxone. More immediate solutions are needed to combat the constantly evolving usage of **opioid adulterants**.
+
+
+```{r, echo=FALSE}
+ggplot(tidy_model, aes(y = estimate, x = level, ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_errorbar(width = 0.2, linewidth = 1.4, color = "red", show.legend = FALSE) +
+  geom_point(size = 1.5, shape = 21, fill = "black", show.legend = FALSE) +
+  labs(title = "Random Effects Estimates for Drug Overdose Deaths",
+       y = "Intercept Estimates",
+       x = "State") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 16),      # Title text size
+    axis.title.x = element_text(size = 14),    # X-axis title text size
+    axis.title.y = element_text(size = 14),    # Y-axis title text size
+    axis.text.x = element_text(size = 6.7),     # X-axis text size
+    axis.text.y = element_text(size = 12)      # Y-axis text size
+  )
+```
+
+
+```{r, include=FALSE}
+# filtered_tidy <- tidy_model %>%
+#   filter((conf.low > 0 & conf.high > 0) | (conf.low < 0 & conf.high < 0))
+library(dplyr)
+filtered_tidy_high <- tidy_model %>%
+  filter((conf.low > 0 & conf.high > 0)) |>
+  arrange(desc(level)) |>
+  dplyr::select(level, estimate) # states that have baseline high intercepts in desc order
+
+```
+
+```{r, include=FALSE}
+# Install and load required packages
+# install.packages("ggplot2")
+# install.packages("maps")
+
+library(ggplot2)
+library(maps)
+
+# Get the map data
+us_map <- map_data("state")
+
+# Create a data frame with states and values for coloring
+set.seed(123)
+states <- unique(us_map$region)
+values <- runif(length(states), min = 1, max = 100) # do an if-else region
+df_values <- data.frame(region = states, value = values)
+df_values$level<- state.abb[match(tolower(df_values$region), tolower(state.name))]
+df_values <- df_values %>%
+  mutate(level = ifelse(is.na(level), "DC", level)) 
+
+merged_df_values <- left_join(df_values, filtered_tidy_high, by="level")
+# df_values[1]['abbreviation'] = 'DC'
+# df_values <- df_values |>
+#   filter(region == 'district of columbia') |>
+#   select(abbreviation) |>
+  
+
+# Merge the map data with your data frame
+us_map <- merge(us_map, merged_df_values, by = "region")
+```
+
+```{r, echo=FALSE}
+ggplot(data = us_map, aes(x = long, y = lat, group = group, fill = estimate)) +
+  geom_polygon(color = "black") +
+  coord_fixed(1.3) +
+  labs(fill = "Baseline Drug Overdoses") +
+  theme_void() +
+  theme(legend.position = "right")
+
+```
+
+# Discussion
+
+#### 1. Limit prescription of drugs for low income communities and introduce alternatives
+
+Prescription drug monitoring programs (PDMP) programs have already been implemented in many states for pharmacies and providers to communicate about patients’ previous and current prescriptions to prevent patients from getting multiple prescriptions at the same time. Socioeconomic data could be additionally integrated into PDMPs, allowing providers to identify patients from low-income counties who may be at higher risk for long-term opioid use and dependence. By understanding these contextual factors, physicians can make more informed decisions and adopt a more conservative approach to prescribing opioids for these populations. Counties might consider increasing funding to provide non-pharmacological treatments such as therapy for low-income communities. 
+
+#### 2. Implement tailored interventions for pregnant and postpartum women dealing with drug abuse
+
+Efforts should be made to destigmatize drug use among pregnant women and reform punitive policies that discourage them from seeking help. Counties might consider referring pregnant and postpartum women with substance use disorders to specialized treatment and support services rather than the criminal justice system. These programs would provide access to addiction treatment, mental health counseling, and prenatal care. Additionally, policies could require pregnant women to join peer support/counseling groups that bring other pregnant women dealing with drug abuse together to normalize and destigmatize being pregnant while battling drug addiction.
+
+Counties should enact policies that protect the parental rights of women undergoing treatment for substance use disorders, ensuring that they are not automatically at risk of losing custody of their children solely due to their substance use history. Child welfare services should focus on family preservation and support, rather than separation, when safe and appropriate.
+
+Counties can provide pregnant women access to supportive housing programs that allow them to maintain custody of their children while receiving treatment. These programs can offer on-site childcare, parenting classes, and family therapy to strengthen family units.
+
+#### 3. Fund and support community-based programs
+
+County legislation can allocate funds or provide grants to community organizations that run support groups, mentorship programs, or outreach efforts targeting at-risk populations. This funding could be used to create new programs or expand existing ones.
+
+Counties can also Invest in the development or expansion of community centers that offer safe spaces for social interaction, peer support groups, and educational workshops on substance abuse prevention and recovery.
+
+#### 4. Closely monitor opioid prescription rate and opioid adulterants in West Virginia and neighboring states. 
+
+From a legislative standpoint, legislators should focus on creating flexible regulatory frameworks that allow for the rapid scheduling and control of new substances as they enter the market. This might involve granting agencies like the DEA the authority to temporarily classify emerging drugs under controlled substance categories, pending further evaluation. Counties can implement real-time surveillance systems to track the presence and spread of opioid adulterants within the local drug supply. This can involve collaboration with local hospitals, law enforcement, and public health agencies to collect and analyze data on overdose cases and drug testing results.
+
+Counties can launch public education campaigns to inform residents about the dangers of opioid adulterants, including the risks associated with substances like xylazine.
+
+To keep up with the rapidly evolving adulterants landscape, counties can pass ordinances that require regular testing of street drugs by local law enforcement or public health departments to identify the presence of dangerous adulterants. This information can be used to issue public warnings and guide local response efforts.
+
+# Limitations and Next Steps
+
+Since we are working with county level data, all individuals’ data in a county are simply averaged so we might be losing important granular differences within counties–this might be an issue especially for larger counties that have multiple urban and rural areas and therefore are more socioeconomically and demographically diverse. This makes it difficult to generalize findings. For example, Los Angeles county is huge (population-wise) with 88 cities and nearly as many unincorporated areas. All these areas have vastly different socioeconomic conditions, access to healthcare, education levels, and employment opportunities. Aggregating by county masks these differences. Thus, we might not capture localized trends in finer geographic regions like cities.
+
+Additionally, while education (measured by high school completion rate) and adult smoking rate are not significant predictors of drug overdose, it is highly correlated with median household income. A next step could be to explore potential interaction effects between education and income to determine if the combined impact of these factors influences drug overdose rates. This could reveal whether the effect of income on overdose risk varies depending on education levels and adult smoking rate. 
+
+It is possible that the effect of predictors on drug overdose might vary by state (or another group), so a potential next step is to include random slopes. Additionally, the correlation of these predictors might vary by demographic. Since we have data on drug overdoses for different ethnic groups, we could make regression models for each and identify the most correlated predictors for each group to design demographic-tailored interventions. 
+
+# References
+
+Centers for Disease Control and Prevention. (n.d.). Opioid prescribing rates in US vary widely between states. Retrieved from https://www.kff.org/statedata/mental-health-and-substance-use-state-fact-sheets/delaware/#:~
+=While%20white%20people%20continue%20to,54%20per%20100%2C000%20in%202021
+
+Drug Enforcement Administration. (2017). West Virginia drug situation report (DEA-WAS-DIR-024-17). Retrieved from https://www.dea.gov/sites/default/files/2018-07/DEA-WAS-DIR-024-17%20West%20Virginia%20Drug%20Situation%20-UNCLASSIFIED.pdf
+
+Garnett, M. F., Curtin, S. C., & Stone, D. M. (2019). Higher median household income was associated with lower drug overdose death rates. Retrieved from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6375680/
+
+Kaiser Family Foundation. (2021). Delaware: Mental health and substance use state fact sheets. Retrieved from https://udspace.udel.edu/bitstreams/0fc089f2-2025-41c6-99de-5aecf8aa2818/download
+
+National Institute on Drug Abuse. (2023). Overdose deaths increased in pregnant and postpartum women from early 2018 to late 2021. Retrieved from https://nida.nih.gov/news-events/news-releases/2023/11/overdose-deaths-increased-in-pregnant-and-postpartum-women-from-early-2018-to-late-2021
+
+
+
+
